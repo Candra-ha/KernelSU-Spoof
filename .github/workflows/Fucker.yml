@@ -1,4 +1,4 @@
-name: fucker
+name: Fucker
 
 on:
   push:
@@ -14,6 +14,7 @@ on:
       - 'manager/**'
       - 'kernel/**'
       - 'userspace/**'
+
   pull_request:
     branches: [ "main" ]
     paths:
@@ -27,68 +28,16 @@ on:
       - 'manager/**'
       - 'kernel/**'
       - 'userspace/**'
+
   workflow_dispatch:
 
 jobs:
-  generate-key:
-    runs-on: ubuntu-latest
-    outputs:
-      expected_size: ${{ steps.extract.outputs.expected_size }}
-      expected_hash: ${{ steps.extract.outputs.expected_hash }}
-      keystore: ${{ steps.gen.outputs.keystore }}
-      keystore_password: ${{ steps.gen.outputs.keystore_password }}
-      key_password: ${{ steps.gen.outputs.key_password }}
-    steps:
-      - name: Generate temporary keystore
-        id: gen
-        run: |
-          KEYSTORE_PASSWORD=$(openssl rand -hex 32)
-          KEY_PASSWORD=$(openssl rand -hex 32)
-          echo "keystore_password=$KEYSTORE_PASSWORD" >> $GITHUB_OUTPUT
-          echo "key_password=$KEY_PASSWORD" >> $GITHUB_OUTPUT
-
-          keytool -genkeypair \
-            -alias pr-key \
-            -keyalg RSA -keysize 2048 \
-            -validity 1 \
-            -storepass "$KEYSTORE_PASSWORD" \
-            -keypass "$KEY_PASSWORD" \
-            -dname "CN=KernelSU PR Build" \
-            -storetype JKS \
-            -keystore pr-key.jks
-
-          echo "keystore=$(base64 -w 0 pr-key.jks)" >> $GITHUB_OUTPUT
-
-      - name: Extract certificate hash and size
-        id: extract
-        env:
-          STORE_PASS: ${{ steps.gen.outputs.keystore_password }}
-        run: |
-          # Export DER certificate
-          keytool -exportcert \
-            -alias pr-key \
-            -keystore pr-key.jks \
-            -storepass "$STORE_PASS" \
-            -file pr-cert.der
-
-          # Calculate size in hex
-          SIZE_DEC=$(stat -c%s pr-cert.der)
-          SIZE_HEX=$(printf '0x%04x' "$SIZE_DEC")
-          echo "expected_size=$SIZE_HEX" >> $GITHUB_OUTPUT
-
-          # Calculate SHA256 hash
-          HASH=$(sha256sum pr-cert.der | awk '{print $1}')
-          echo "expected_hash=$HASH" >> $GITHUB_OUTPUT
-
-          echo "Certificate size: $SIZE_HEX ($SIZE_DEC bytes)"
-          echo "Certificate hash: $HASH"
 
   build-lkm:
-    needs: generate-key
     uses: ./.github/workflows/build-lkm.yml
     with:
-      expected_size2: ${{ needs.generate-key.outputs.expected_size || '' }}
-      expected_hash2: ${{ needs.generate-key.outputs.expected_hash || '' }}
+      expected_size2: ''
+      expected_hash2: ''
     secrets: inherit
 
   build-ksuinit:
@@ -106,21 +55,21 @@ jobs:
       target: ${{ matrix.target }}
       pack_lkm: true
       pack_ksuinit: true
-  
+
   build-ksud-extra:
     needs: [build-lkm, build-ksuinit]
     strategy:
       matrix:
         include:
-          - target: x86_64-pc-windows-gnu # windows pc
+          - target: x86_64-pc-windows-gnu
             os: ubuntu-latest
-          - target: x86_64-apple-darwin # Intel mac
+          - target: x86_64-apple-darwin
             os: macos-latest
-          - target: aarch64-apple-darwin # M chip mac
+          - target: aarch64-apple-darwin
             os: macos-latest
-          - target: aarch64-unknown-linux-musl # arm64 Linux
+          - target: aarch64-unknown-linux-musl
             os: ubuntu-latest
-          - target: x86_64-unknown-linux-musl # x86 Linux
+          - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
     uses: ./.github/workflows/ksud-extra.yml
     with:
@@ -130,8 +79,7 @@ jobs:
       pack_ksuinit: true
 
   build-manager:
-    needs: [generate-key]
-    if: always() && needs.generate-key.result == 'success'
+    needs: [build-lkm]
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -145,29 +93,12 @@ jobs:
 
       - name: Write key
         run: |
-          if [ ! -z "${{ secrets.KEYSTORE }}" ]; then
-            {
-              echo KEYSTORE_PASSWORD='${{ secrets.KEYSTORE_PASSWORD }}'
-              echo KEY_ALIAS='${{ secrets.KEY_ALIAS }}'
-              echo KEY_PASSWORD='${{ secrets.KEY_PASSWORD }}'
-              echo KEYSTORE_FILE='key.jks'
-            } >> gradle.properties
-            echo ${{ secrets.KEYSTORE }} | base64 -d > key.jks
-          fi
-
-      - name: Write PR key
-        env:
-          PR_KEYSTORE: ${{ needs.generate-key.outputs.keystore }}
-          PR_KEYSTORE_PASSWORD: ${{ needs.generate-key.outputs.keystore_password }}
-          PR_KEY_PASSWORD: ${{ needs.generate-key.outputs.key_password }}
-        run: |
-          echo "$PR_KEYSTORE" | base64 -d > pr-key.jks
-          {
-            echo KEYSTORE_PASSWORD="$PR_KEYSTORE_PASSWORD"
-            echo KEY_ALIAS='pr-key'
-            echo KEY_PASSWORD="$PR_KEY_PASSWORD"
-            echo KEYSTORE_FILE='pr-key.jks'
-          } >> gradle.properties
+          test -n "${{ secrets.KEYSTORE }}"
+          echo KEYSTORE_PASSWORD='${{ secrets.KEYSTORE_PASSWORD }}' >> gradle.properties
+          echo KEY_ALIAS='${{ secrets.KEY_ALIAS }}' >> gradle.properties
+          echo KEY_PASSWORD='${{ secrets.KEY_PASSWORD }}' >> gradle.properties
+          echo KEYSTORE_FILE='key.jks' >> gradle.properties
+          echo "${{ secrets.KEYSTORE }}" | base64 -d > key.jks
 
       - name: Setup Java
         uses: actions/setup-java@v5
@@ -181,11 +112,6 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v4
 
-      - name: Spoof Package ID
-        run: |
-          chmod +x spoof
-          ./spoof
-
       - name: Build with Gradle
         run: ./gradlew clean assembleRelease
 
@@ -198,12 +124,11 @@ jobs:
       - name: Upload mappings
         uses: actions/upload-artifact@v7
         with:
-          name: "mappings"
-          path: "manager/app/build/outputs/mapping/release/"
+          name: mappings
+          path: manager/app/build/outputs/mapping/release/
 
   repack-manager:
-    needs: [build-manager, build-ksud, generate-key]
-    if: always() && needs.build-manager.result == 'success' && needs.build-ksud.result == 'success' && needs.generate-key.result == 'success'
+    needs: [build-manager, build-ksud]
     runs-on: ubuntu-latest
 
     steps:
@@ -212,14 +137,10 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Setup need_upload
-        id: need_upload
+      - name: Spoof Package ID
         run: |
-          if [ ! -z "${{ secrets.BOT_TOKEN }}" ]; then
-            echo "UPLOAD=true" >> $GITHUB_OUTPUT
-          else
-            echo "UPLOAD=false" >> $GITHUB_OUTPUT
-          fi
+          chmod +x spoof
+          ./spoof
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v4
@@ -251,29 +172,29 @@ jobs:
 
           mkdir -p target/aarch64-linux-android/release
           mkdir -p target/x86_64-linux-android/release
+
           ARM64_KSUD=$(find artifacts/ksud-aarch64-linux-android -type f -name ksud | head -n 1)
           X86_64_KSUD=$(find artifacts/ksud-x86_64-linux-android -type f -name ksud | head -n 1)
+
           test -n "$ARM64_KSUD"
           test -n "$X86_64_KSUD"
+
           cp -f "$ARM64_KSUD" target/aarch64-linux-android/release/ksud
           cp -f "$X86_64_KSUD" target/x86_64-linux-android/release/ksud
 
       - name: Prepare signing inputs
         env:
-          PR_KEYSTORE: ${{ needs.generate-key.outputs.keystore }}
-          PR_KEYSTORE_PASSWORD: ${{ needs.generate-key.outputs.keystore_password }}
-          PR_KEY_PASSWORD: ${{ needs.generate-key.outputs.key_password }}
           PROD_KEYSTORE: ${{ secrets.KEYSTORE }}
           PROD_KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           PROD_KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           PROD_KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
-            test -n "$PROD_KEYSTORE"
-            echo "$PROD_KEYSTORE" | base64 -d > key.jks
-            echo "SIGN_KEYSTORE_FILE=key.jks" >> $GITHUB_ENV
-            echo "SIGN_KEY_ALIAS=$PROD_KEY_ALIAS" >> $GITHUB_ENV
-            echo "SIGN_KEYSTORE_PASSWORD=$PROD_KEYSTORE_PASSWORD" >> $GITHUB_ENV
-            echo "SIGN_KEY_PASSWORD=$PROD_KEY_PASSWORD" >> $GITHUB_ENV
+          test -n "$PROD_KEYSTORE"
+          echo "$PROD_KEYSTORE" | base64 -d > key.jks
+          echo "SIGN_KEYSTORE_FILE=key.jks" >> $GITHUB_ENV
+          echo "SIGN_KEY_ALIAS=$PROD_KEY_ALIAS" >> $GITHUB_ENV
+          echo "SIGN_KEYSTORE_PASSWORD=$PROD_KEYSTORE_PASSWORD" >> $GITHUB_ENV
+          echo "SIGN_KEY_PASSWORD=$PROD_KEY_PASSWORD" >> $GITHUB_ENV
 
       - name: Repack and resign
         run: |
